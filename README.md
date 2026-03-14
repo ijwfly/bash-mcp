@@ -5,6 +5,7 @@ A Docker container with an MCP server that gives AI agents the ability to execut
 ## Features
 
 - **bash_exec** — execute arbitrary bash commands with configurable timeout
+- **JWT authentication** — optional HMAC-SHA256 JWT auth with per-user workspace isolation
 - **Base image** — extend with `FROM bash-mcp:latest`
 - **Preinstalled tools** — curl, wget, jq, git, python3, and more
 
@@ -15,6 +16,33 @@ docker compose up -d --build
 ```
 
 The server will start at `http://localhost:8080/mcp` (Streamable HTTP).
+
+### With Authentication
+
+1. Set `JWT_SECRET` in `docker-compose.yml` or pass via environment:
+
+```bash
+JWT_SECRET=your-secret docker compose up -d --build
+```
+
+2. Generate a token:
+
+```bash
+python3 server/generate_token.py --user-id alice --secret your-secret
+python3 server/generate_token.py --user-id alice --secret your-secret --ttl 30d
+```
+
+3. Use the token in requests:
+
+```bash
+curl -s -X POST http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Authorization: Bearer <token>' \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"bash_exec","arguments":{"command":"whoami"}},"id":1}'
+```
+
+Each user gets an isolated workspace at `/workspace/user_<sanitized_id>` and commands run under a dedicated OS user.
 
 ### Connecting to an MCP Client
 
@@ -34,17 +62,11 @@ Claude Desktop, Cursor, and other MCP clients:
 ### Testing with curl
 
 ```bash
-# Execute a command
+# Execute a command (no-auth mode, requires ALLOW_NO_AUTH=true)
 curl -s -X POST http://localhost:8080/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"bash_exec","arguments":{"command":"echo hello"}},"id":1}'
-
-# With timeout (will be terminated after 5 sec)
-curl -s -X POST http://localhost:8080/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"bash_exec","arguments":{"command":"sleep 60","timeout":5}},"id":1}'
 ```
 
 ## Environment Variables
@@ -53,13 +75,50 @@ curl -s -X POST http://localhost:8080/mcp \
 |---|---|---|
 | `MCP_PORT` | `8080` | Server port |
 | `BASH_TIMEOUT_MAX` | `300` | Maximum bash_exec timeout (sec) |
+| `JWT_SECRET` | *(empty)* | HMAC-SHA256 secret for JWT auth. If unset, all requests return 403 unless `ALLOW_NO_AUTH` is set |
+| `ALLOW_NO_AUTH` | `false` | Set to `true` to allow running without `JWT_SECRET` (open access, no auth) |
+
+## JWT Token Format
+
+Payload:
+
+```json
+{
+  "user_id": "alice",
+  "iat": 1710000000,
+  "exp": 1712592000
+}
+```
+
+- `user_id` (required) — arbitrary identifier (email, UUID, etc.)
+- `iat` — issued-at timestamp
+- `exp` (optional) — expiration timestamp
+
+The `user_id` is sanitized to a Linux username: `user_` + lowercase alphanumeric (non-matching chars replaced with `_`), max 32 chars total.
+
+## Token Generation
+
+```bash
+# Permanent token
+python3 server/generate_token.py --user-id alice --secret mysecret
+
+# Token with TTL
+python3 server/generate_token.py --user-id alice --secret mysecret --ttl 30d
+python3 server/generate_token.py --user-id alice --secret mysecret --ttl 24h
+```
 
 ## Extending the Image
 
 ```dockerfile
 FROM bash-mcp:latest
 
-USER root
 RUN apt-get update && apt-get install -y postgresql-client
-USER mcpuser
 ```
+
+## End-to-End Tests
+
+```bash
+./test.sh
+```
+
+Builds the image, starts the container with JWT auth, runs authentication and isolation tests, then cleans up.

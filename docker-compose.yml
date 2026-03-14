@@ -8,3 +8,5 @@ services:
     environment:
       - MCP_PORT=8080
       - BASH_TIMEOUT_MAX=300
+      - JWT_SECRET=${JWT_SECRET:-}
+      - ALLOW_NO_AUTH=${ALLOW_NO_AUTH:-}
