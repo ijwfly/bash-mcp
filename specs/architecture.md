@@ -2,7 +2,7 @@
 
 ## What Is It
 
-bash-mcp is a self-hosted Docker container that provides an MCP server (Model Context Protocol) with a single `bash_exec` tool. It allows AI agents to execute arbitrary bash commands inside an isolated container. Comes with `ocli` (openapi-to-cli) preinstalled for interacting with HTTP APIs from the command line.
+bash-mcp is a self-hosted Docker container that provides an MCP server (Model Context Protocol) with a single `bash_exec` tool. It allows AI agents to execute arbitrary bash commands inside an isolated container.
 
 ---
 
@@ -12,7 +12,7 @@ bash-mcp is a self-hosted Docker container that provides an MCP server (Model Co
 bash-mcp/
 ├── Dockerfile              # Image based on Ubuntu 24.04
 ├── docker-compose.yml      # Run configuration
-├── entrypoint.sh           # ocli profile initialization + server startup
+├── entrypoint.sh           # Server startup script
 ├── server/
 │   ├── main.py             # MCP server (FastMCP + asyncio)
 │   └── requirements.txt    # Python dependencies
@@ -34,8 +34,7 @@ bash-mcp/
 │                                                      │
 │  ┌────────────────────────────────────────────────┐  │
 │  │  entrypoint.sh                                 │  │
-│  │  1. Set up ocli profiles                       │  │
-│  │  2. exec python3 /opt/server/main.py           │  │
+│  │  exec python3 /opt/server/main.py              │  │
 │  └────────────────────────────────────────────────┘  │
 │                     │                                │
 │                     ▼                                │
@@ -54,7 +53,6 @@ bash-mcp/
 │  └────────────────────────────────────────────────┘  │
 │                                                      │
 │  /workspace  ← volume mount (persistent data)       │
-│  ~/.ocli/    ← ocli profiles                         │
 │                                                      │
 │  User: mcpuser (unprivileged)                        │
 └──────────────────────────────────────────────────────┘
@@ -75,7 +73,6 @@ bash-mcp/
 | HTTP server | uvicorn (ASGI) |
 | Command execution | `asyncio.create_subprocess_exec` |
 | Base image | Ubuntu 24.04 |
-| API CLI | `ocli` (openapi-to-cli) via npm |
 
 ### MCP Server (`server/main.py`)
 
@@ -91,19 +88,7 @@ The server is built on FastMCP in stateless mode — each HTTP request is handle
 
 ### Entrypoint (`entrypoint.sh`)
 
-Initialization script that runs on container startup:
-
-1. **If `~/.ocli/profiles.ini` is mounted** (method A):
-   - Parses section names `[profile_name]` from the INI file
-   - Runs `ocli spec refresh --profile <name>` for each profile
-   - This downloads and caches OpenAPI specifications
-
-2. **If the file does not exist** (method B):
-   - Looks for env variables matching `OCLI_PROFILE_{NAME}_*`
-   - Groups by `{NAME}`, converts to lowercase
-   - Runs `ocli profiles add` with the corresponding flags for each group
-
-3. Starts the MCP server via `exec` (process replacement for proper signal forwarding)
+A minimal startup script that launches the MCP server via `exec` (process replacement for proper signal forwarding).
 
 ### Docker Image (`Dockerfile`)
 
@@ -111,20 +96,18 @@ Multi-layer build optimized for caching:
 
 ```
 Layer 1: apt-get install (system packages)       ← rarely changes
-Layer 2: npm install -g openapi-to-cli           ← rarely changes
-Layer 3: useradd mcpuser                         ← never changes
-Layer 4: pip install -r requirements.txt         ← changes on dependency updates
-Layer 5: COPY server/ + entrypoint.sh            ← changes on code updates
-Layer 6: mkdir /workspace, ~/.ocli               ← never changes
+Layer 2: useradd mcpuser                         ← never changes
+Layer 3: pip install -r requirements.txt         ← changes on dependency updates
+Layer 4: COPY server/ + entrypoint.sh            ← changes on code updates
+Layer 5: mkdir /workspace                        ← never changes
 ```
 
 **Preinstalled tools:**
 - Core: `bash`, `curl`, `wget`, `jq`, `git`
 - Editors: `vim`, `nano`
-- Languages: `python3`, `pip`, `nodejs`, `npm`
+- Languages: `python3`, `pip`
 - Networking: `net-tools`, `iputils-ping`, `dnsutils`
 - Monitoring: `htop`
-- API CLI: `ocli`
 
 ---
 
@@ -215,80 +198,12 @@ Example MCP client configuration:
 
 ---
 
-## Configuring ocli Profiles
-
-### Method A — Volume with profiles.ini (recommended)
-
-Create an `ocli-profiles.ini` file:
-```ini
-[myapi]
-api_base_url = http://my-service:3000
-api_bearer_token = secret-token
-openapi_spec_source = http://my-service:3000/openapi.json
-
-[payments]
-api_base_url = http://payments-svc:4000
-api_bearer_token = another-token
-openapi_spec_source = http://payments-svc:4000/openapi.json
-```
-
-Uncomment the line in `docker-compose.yml`:
-```yaml
-volumes:
-  - ./workspace:/workspace
-  - ./ocli-profiles.ini:/home/mcpuser/.ocli/profiles.ini:ro
-```
-
-On container startup, `entrypoint.sh` will automatically download and cache OpenAPI specifications for each profile.
-
-### Method B — Environment Variables
-
-Uncomment and fill in `docker-compose.yml`:
-```yaml
-environment:
-  - MCP_PORT=8080
-  - BASH_TIMEOUT_MAX=300
-  - OCLI_PROFILE_MYAPI_BASE_URL=http://my-service:3000
-  - OCLI_PROFILE_MYAPI_SPEC=http://my-service:3000/openapi.json
-  - OCLI_PROFILE_MYAPI_TOKEN=secret-token
-```
-
-**Available variables for each profile `{NAME}`:**
-
-| Variable | Required | Description |
-|---|---|---|
-| `OCLI_PROFILE_{NAME}_BASE_URL` | yes | API base URL |
-| `OCLI_PROFILE_{NAME}_SPEC` | yes | URL or path to the OpenAPI specification |
-| `OCLI_PROFILE_{NAME}_TOKEN` | no | Bearer token for authorization |
-| `OCLI_PROFILE_{NAME}_BASIC_AUTH` | no | Basic Auth credentials |
-| `OCLI_PROFILE_{NAME}_INCLUDE` | no | Include only these endpoints (comma-separated) |
-| `OCLI_PROFILE_{NAME}_EXCLUDE` | no | Exclude these endpoints (comma-separated) |
-
-`{NAME}` is specified in uppercase in the variables, but the profile itself is created in lowercase.
-
-### Using ocli via bash_exec
-
-Once profiles are configured, the agent can interact with APIs:
-```bash
-# List available commands
-bash_exec("ocli commands --query 'create user'")
-
-# Call an endpoint
-bash_exec("ocli myapi_users_post --name Alice --email alice@example.com")
-
-# Fetch data and process with jq
-bash_exec("ocli payments_invoices_get --limit 10 | jq '.items[]'")
-```
-
----
-
 ## Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `MCP_PORT` | `8080` | MCP server port |
 | `BASH_TIMEOUT_MAX` | `300` | Maximum allowed timeout for bash_exec (seconds) |
-| `OCLI_PROFILE_{NAME}_*` | — | ocli profile settings (see above) |
 
 ---
 

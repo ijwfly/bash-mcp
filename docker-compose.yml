@@ -5,12 +5,6 @@ services:
       - "8080:8080"
     volumes:
       - ./workspace:/workspace
-      # Method A: mount a ready-made profiles.ini
-      # - ./ocli-profiles.ini:/home/mcpuser/.ocli/profiles.ini:ro
     environment:
       - MCP_PORT=8080
       - BASH_TIMEOUT_MAX=300
-      # Method B: env vars (used when profiles.ini is not mounted)
-      # - OCLI_PROFILE_MYAPI_BASE_URL=http://my-service:3000
-      # - OCLI_PROFILE_MYAPI_SPEC=http://my-service:3000/openapi.json
-      # - OCLI_PROFILE_MYAPI_TOKEN=secret
