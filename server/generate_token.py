@@ -19,6 +19,12 @@ def parse_ttl(ttl_str: str) -> int:
     return value * multipliers[unit]
 
 
+def sanitize_username(user_id: str) -> str:
+    """Convert arbitrary user_id to a valid Linux username."""
+    cleaned = re.sub(r"[^a-z0-9]", "_", user_id.lower())[:28]
+    return f"user_{cleaned}"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate a JWT token for bash-mcp")
     parser.add_argument("--user-id", required=True, help="User identifier (e.g. email, UUID)")
@@ -26,14 +32,16 @@ def main():
     parser.add_argument("--ttl", default=None, help="Token TTL, e.g. '30d', '24h', '1h'")
     args = parser.parse_args()
 
+    linux_user = sanitize_username(args.user_id)
     now = int(time.time())
-    payload = {"user_id": args.user_id, "iat": now}
+    payload = {"user_id": args.user_id, "sub": linux_user, "iat": now}
 
     if args.ttl:
         payload["exp"] = now + parse_ttl(args.ttl)
 
     token = jwt.encode(payload, args.secret, algorithm="HS256")
     print(token)
+    print(f"linux_user: {linux_user}", file=sys.stderr)
 
 
 if __name__ == "__main__":

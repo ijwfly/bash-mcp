@@ -84,17 +84,17 @@ Payload:
 
 ```json
 {
-  "user_id": "alice",
+  "user_id": "alice@corp.com",
+  "sub": "user_alice_corp_com",
   "iat": 1710000000,
   "exp": 1712592000
 }
 ```
 
-- `user_id` (required) — arbitrary identifier (email, UUID, etc.)
+- `user_id` (required) — external user identifier (email, UUID, etc.) for readability
+- `sub` (required) — authoritative internal Linux username, computed by `generate_token.py` at token creation time
 - `iat` — issued-at timestamp
 - `exp` (optional) — expiration timestamp
-
-The `user_id` is sanitized to a Linux username: `user_` + lowercase alphanumeric (non-matching chars replaced with `_`), max 32 chars total.
 
 ## Token Generation
 

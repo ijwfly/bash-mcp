@@ -44,7 +44,7 @@ bash-mcp/
 │  │  JWTAuthMiddleware (ASGI)                              │  │
 │  │  ├── JWT_SECRET not set → 403 (or pass if ALLOW_NO_AUTH)│  │
 │  │  ├── Verify Bearer token (HMAC-SHA256)                 │  │
-│  │  ├── Extract user_id → sanitize → ContextVar           │  │
+│  │  ├── Extract sub (linux username) → ContextVar           │  │
 │  │  └── Missing/invalid/expired → 401                     │  │
 │  └────────────────────────────────────────────────────────┘  │
 │                     │                                        │
@@ -99,7 +99,7 @@ The server is built on FastMCP in stateless mode — each HTTP request is handle
 - If `JWT_SECRET` is not set — rejects with 403 (set `ALLOW_NO_AUTH=true` for open access)
 - Extracts `Authorization: Bearer <token>` header
 - Verifies JWT with HMAC-SHA256
-- Extracts `user_id`, sanitizes to Linux username, stores in `ContextVar`
+- Extracts `sub` (internal Linux username) from JWT, stores in `ContextVar`
 - Returns 401 on missing/invalid/expired tokens
 
 **`bash_exec` tool:**
@@ -111,13 +111,9 @@ The server is built on FastMCP in stateless mode — each HTTP request is handle
 - On timeout, the process is killed via `proc.kill()`
 - Returns `{stdout, stderr, exit_code}`
 
-**`sanitize_username(user_id)`:**
-- Lowercase → replace `[^a-z0-9]` with `_` → truncate to 28 chars → prefix `user_`
-- Max 32 chars total (Linux username limit)
-
 ### Token Generation (`server/generate_token.py`)
 
-CLI utility for generating JWT tokens:
+CLI utility for generating JWT tokens. Computes `sub` (internal Linux username) via `sanitize_username()` and embeds it in the JWT payload, making the token the single source of truth for the external↔internal identity mapping.
 ```bash
 python3 server/generate_token.py --user-id alice --secret mysecret
 python3 server/generate_token.py --user-id alice --secret mysecret --ttl 30d

@@ -78,12 +78,14 @@ When `JWT_SECRET` is not set:
 ```json
 {
   "user_id": "alice@corp.com",
+  "sub": "user_alice_corp_com",
   "iat": 1710000000,
   "exp": 1712592000
 }
 ```
 
-- `user_id` (required) — arbitrary user identifier
+- `user_id` (required) — external user identifier for readability
+- `sub` (required) — authoritative internal Linux username, computed at token generation time
 - `exp` (optional) — expiration timestamp
 
 ### Username Sanitization

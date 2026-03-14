@@ -1,6 +1,5 @@
 import asyncio
 import os
-import re
 import subprocess
 from contextvars import ContextVar
 
@@ -20,16 +19,6 @@ mcp = FastMCP(
     host="0.0.0.0",
     port=PORT,
 )
-
-
-def sanitize_username(user_id: str) -> str:
-    """Convert arbitrary user_id to a valid Linux username.
-
-    Rules: prefix ``user_`` + lowercase alphanumeric (everything else → ``_``),
-    truncated to 32 chars total (28 after prefix).
-    """
-    cleaned = re.sub(r"[^a-z0-9]", "_", user_id.lower())[:28]
-    return f"user_{cleaned}"
 
 
 def ensure_user(linux_user: str) -> None:
@@ -97,12 +86,10 @@ class JWTAuthMiddleware:
             await self._send_401(send, "Invalid token")
             return
 
-        user_id = payload.get("user_id")
-        if not user_id:
-            await self._send_401(send, "Token missing user_id claim")
+        linux_user = payload.get("sub")
+        if not linux_user:
+            await self._send_401(send, "Token missing sub claim")
             return
-
-        linux_user = sanitize_username(user_id)
         ctx_token = current_user.set(linux_user)
         try:
             await self.app(scope, receive, send)
