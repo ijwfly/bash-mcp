@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import signal
 import subprocess
 from contextvars import ContextVar
 
@@ -24,15 +25,16 @@ mcp = FastMCP(
 
 def ensure_user(linux_user: str) -> None:
     """Create OS user and workspace directory if they don't exist yet."""
+    # Check for the OS user, not the directory — the workspace dir may
+    # persist across container restarts via a bind mount.
+    r = subprocess.run(["id", linux_user], capture_output=True)
+    if r.returncode != 0:
+        subprocess.run(
+            ["useradd", "-m", "-s", "/bin/bash", linux_user],
+            check=False,
+            capture_output=True,
+        )
     workspace = f"/workspace/{linux_user}"
-    if os.path.isdir(workspace):
-        return
-    # Create OS user (ignore error if already exists)
-    subprocess.run(
-        ["useradd", "-m", "-s", "/bin/bash", linux_user],
-        check=False,
-        capture_output=True,
-    )
     os.makedirs(workspace, exist_ok=True)
     subprocess.run(["chown", "-R", f"{linux_user}:{linux_user}", workspace], check=False)
 
@@ -156,9 +158,23 @@ async def _run_file_op(linux_user: str, payload: dict) -> dict:
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        preexec_fn=os.setsid,
     )
     stdin_data = json.dumps(payload).encode()
-    stdout, stderr = await proc.communicate(input=stdin_data)
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=stdin_data), timeout=30
+        )
+    except asyncio.TimeoutError:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
+        return {"error": "File operation timed out"}
     if proc.returncode != 0:
         return {"error": stderr.decode(errors="replace").strip() or "Helper failed"}
     return json.loads(stdout.decode())
@@ -196,6 +212,7 @@ async def bash_exec(command: str, timeout: int = 30) -> dict:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        preexec_fn=os.setsid,
     )
 
     try:
@@ -206,8 +223,15 @@ async def bash_exec(command: str, timeout: int = 30) -> dict:
             "exit_code": proc.returncode,
         }
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        # Kill entire process group (sudo + bash + all children)
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
         return {
             "stdout": "",
             "stderr": f"Command timed out after {timeout} seconds",
