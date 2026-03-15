@@ -5,6 +5,7 @@ A Docker container with an MCP server that gives AI agents the ability to execut
 ## Features
 
 - **bash_exec** — execute arbitrary bash commands with configurable timeout
+- **read_file** / **write_file** / **edit_file** — direct file operations without shell escaping hassles
 - **JWT authentication** — optional HMAC-SHA256 JWT auth with per-user workspace isolation
 - **Base image** — extend with `FROM bash-mcp:latest`
 - **Preinstalled tools** — curl, wget, jq, git, python3, and more

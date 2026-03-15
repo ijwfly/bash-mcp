@@ -117,11 +117,79 @@ echo "$bob_result" | grep -q "FILE_NOT_FOUND\|No such file" \
   && pass "Bob cannot see Alice's file" \
   || fail "Bob saw Alice's file: '$bob_result'"
 
+# ─── File Tools Tests ────────────────────────────────────────────────────
+
+# Generic helper: call any MCP tool
+mcp_tool_call() {
+  local tool="$1"
+  local args_json="$2"
+  local token="${3:-}"
+  local auth_header=""
+  [ -n "$token" ] && auth_header="-H \"Authorization: Bearer $token\""
+  eval curl -sf -X POST "$MCP_URL" \
+    -H "'Content-Type: application/json'" \
+    -H "'Accept: application/json, text/event-stream'" \
+    $auth_header \
+    -d "'$(printf '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"%s","arguments":%s},"id":1}' "$tool" "$args_json")'"
+}
+
+extract_field() {
+  # Extract a field from the SSE JSON-RPC result's text content
+  local field="$1"
+  echo "$2" | grep '^data:' | tail -1 | sed 's/^data://' | python3 -c "
+import sys, json
+resp = json.load(sys.stdin)
+content = resp.get('result', {}).get('content', [{}])
+text = content[0].get('text', '{}') if content else '{}'
+parsed = json.loads(text)
+print(parsed.get('$field', ''))
+"
+}
+
+# Test 8: write_file + read_file round-trip
+echo "--- Test 8: write_file + read_file round-trip ---"
+resp=$(mcp_tool_call "write_file" '{"path":"test_rw.txt","content":"hello from write_file\nsecond line\n"}' "$TOKEN_ALICE")
+status_val=$(extract_field "status" "$resp")
+[ "$status_val" = "ok" ] || fail "write_file failed: $resp"
+resp=$(mcp_tool_call "read_file" '{"path":"test_rw.txt"}' "$TOKEN_ALICE")
+content_val=$(extract_field "content" "$resp")
+echo "$content_val" | grep -q "hello from write_file" \
+  && pass "write_file + read_file round-trip" \
+  || fail "read_file content mismatch: '$content_val'"
+
+# Test 9: edit_file
+echo "--- Test 9: edit_file ---"
+resp=$(mcp_tool_call "edit_file" '{"path":"test_rw.txt","old_text":"hello from write_file","new_text":"EDITED"}' "$TOKEN_ALICE")
+status_val=$(extract_field "status" "$resp")
+[ "$status_val" = "ok" ] || fail "edit_file failed: $resp"
+resp=$(mcp_tool_call "read_file" '{"path":"test_rw.txt"}' "$TOKEN_ALICE")
+content_val=$(extract_field "content" "$resp")
+echo "$content_val" | grep -q "EDITED" \
+  && pass "edit_file replaced text" \
+  || fail "edit_file content mismatch: '$content_val'"
+
+# Test 10: file isolation — Alice's file not visible to Bob
+echo "--- Test 10: File tool isolation ---"
+mcp_tool_call "write_file" '{"path":"secret_file.txt","content":"alice secret"}' "$TOKEN_ALICE" > /dev/null
+resp=$(mcp_tool_call "read_file" '{"path":"secret_file.txt"}' "$TOKEN_BOB")
+error_val=$(extract_field "error" "$resp")
+echo "$error_val" | grep -q "not found\|No such file" \
+  && pass "Bob cannot read Alice's file via read_file" \
+  || fail "Bob saw Alice's file: '$resp'"
+
+# Test 11: Alice writes to Bob's workspace via absolute path → permission denied
+echo "--- Test 11: File tool cross-user write blocked ---"
+resp=$(mcp_tool_call "write_file" '{"path":"/workspace/user_bob/hacked.txt","content":"pwned"}' "$TOKEN_ALICE")
+error_val=$(extract_field "error" "$resp")
+echo "$error_val" | grep -qi "permission denied\|Permission denied" \
+  && pass "Alice cannot write to Bob's workspace" \
+  || fail "Expected permission denied, got: '$error_val' (full: $resp)"
+
 docker compose down --volumes
 
-# ─── Test 8: ALLOW_NO_AUTH mode ──────────────────────────────────────────
+# ─── Test 12: ALLOW_NO_AUTH mode ──────────────────────────────────────────
 echo ""
-echo "--- Test 8: ALLOW_NO_AUTH=true → open access ---"
+echo "--- Test 12: ALLOW_NO_AUTH=true → open access ---"
 ALLOW_NO_AUTH=true docker compose up -d
 sleep 3
 resp=$(mcp_call "echo ok")

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import subprocess
 from contextvars import ContextVar
@@ -124,7 +125,47 @@ class JWTAuthMiddleware:
 
 
 # ---------------------------------------------------------------------------
-# Tool
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_path(path: str) -> tuple[str, str | None]:
+    """Return (absolute_path, linux_user | None)."""
+    try:
+        linux_user = current_user.get()
+    except LookupError:
+        linux_user = None
+
+    if linux_user:
+        ensure_user(linux_user)
+        cwd = f"/workspace/{linux_user}"
+    else:
+        cwd = "/workspace"
+
+    if not os.path.isabs(path):
+        path = os.path.join(cwd, path)
+    path = os.path.realpath(path)
+
+    return path, linux_user
+
+
+async def _run_file_op(linux_user: str, payload: dict) -> dict:
+    """Run a file operation as linux_user via the file_helper.py subprocess."""
+    cmd = ["sudo", "-u", linux_user, "python3", "/opt/server/file_helper.py"]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdin_data = json.dumps(payload).encode()
+    stdout, stderr = await proc.communicate(input=stdin_data)
+    if proc.returncode != 0:
+        return {"error": stderr.decode(errors="replace").strip() or "Helper failed"}
+    return json.loads(stdout.decode())
+
+
+# ---------------------------------------------------------------------------
+# Tools
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -172,6 +213,103 @@ async def bash_exec(command: str, timeout: int = 30) -> dict:
             "stderr": f"Command timed out after {timeout} seconds",
             "exit_code": -1,
         }
+
+
+@mcp.tool()
+async def read_file(path: str, limit: int = 0) -> dict:
+    """Read the contents of a file. Paths are resolved relative to the
+    user's workspace directory. Use ``limit`` to return only the first N lines."""
+    resolved, linux_user = _resolve_path(path)
+
+    if linux_user:
+        return await _run_file_op(linux_user, {"op": "read", "path": resolved, "limit": limit})
+
+    try:
+        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except FileNotFoundError:
+        return {"error": f"File not found: {resolved}"}
+    except IsADirectoryError:
+        return {"error": f"Is a directory: {resolved}"}
+    except PermissionError:
+        return {"error": f"Permission denied: {resolved}"}
+
+    lines = content.splitlines(keepends=True)
+    if limit > 0:
+        lines = lines[:limit]
+        content = "".join(lines)
+
+    return {
+        "content": content,
+        "size": os.path.getsize(resolved),
+        "lines": len(lines),
+    }
+
+
+@mcp.tool()
+async def write_file(path: str, content: str) -> dict:
+    """Write content to a file, creating parent directories as needed.
+    Paths are resolved relative to the user's workspace directory."""
+    resolved, linux_user = _resolve_path(path)
+
+    if linux_user:
+        return await _run_file_op(linux_user, {"op": "write", "path": resolved, "content": content})
+
+    try:
+        parent = os.path.dirname(resolved)
+        os.makedirs(parent, exist_ok=True)
+        with open(resolved, "w", encoding="utf-8") as f:
+            f.write(content)
+    except PermissionError:
+        return {"error": f"Permission denied: {resolved}"}
+    except IsADirectoryError:
+        return {"error": f"Is a directory: {resolved}"}
+
+    return {
+        "status": "ok",
+        "size": os.path.getsize(resolved),
+        "path": resolved,
+    }
+
+
+@mcp.tool()
+async def edit_file(path: str, old_text: str, new_text: str) -> dict:
+    """Replace an exact occurrence of ``old_text`` with ``new_text`` in a file.
+    ``old_text`` must appear exactly once; otherwise an error is returned.
+    Paths are resolved relative to the user's workspace directory."""
+    resolved, linux_user = _resolve_path(path)
+
+    if linux_user:
+        return await _run_file_op(linux_user, {
+            "op": "edit", "path": resolved,
+            "old_text": old_text, "new_text": new_text,
+        })
+
+    try:
+        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except FileNotFoundError:
+        return {"error": f"File not found: {resolved}"}
+    except IsADirectoryError:
+        return {"error": f"Is a directory: {resolved}"}
+    except PermissionError:
+        return {"error": f"Permission denied: {resolved}"}
+
+    count = content.count(old_text)
+    if count == 0:
+        return {"error": "old_text not found"}
+    if count > 1:
+        return {"error": f"old_text found {count} times, must be unique"}
+
+    new_content = content.replace(old_text, new_text, 1)
+
+    try:
+        with open(resolved, "w", encoding="utf-8") as f:
+            f.write(new_content)
+    except PermissionError:
+        return {"error": f"Permission denied: {resolved}"}
+
+    return {"status": "ok", "replacements": 1}
 
 
 # ---------------------------------------------------------------------------

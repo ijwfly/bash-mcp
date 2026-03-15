@@ -2,7 +2,7 @@
 
 ## What Is It
 
-bash-mcp is a self-hosted Docker container that provides an MCP server (Model Context Protocol) with a single `bash_exec` tool. It allows AI agents to execute arbitrary bash commands inside an isolated container, with optional JWT-based multi-user authentication and workspace isolation.
+bash-mcp is a self-hosted Docker container that provides an MCP server (Model Context Protocol) with tools for bash execution and file operations. It allows AI agents to execute arbitrary bash commands inside an isolated container, with optional JWT-based multi-user authentication and workspace isolation.
 
 ---
 
@@ -59,6 +59,12 @@ bash-mcp/
 │  │  │  ├── No auth: bash -c "$cmd", cwd=/workspace   │    │  │
 │  │  │  └── Auth: sudo -u $user bash -c "$cmd"        │    │  │
 │  │  │          cwd=/workspace/$user                   │    │  │
+│  │  ├────────────────────────────────────────────────┤    │  │
+│  │  │  read_file(path, limit)                        │    │  │
+│  │  │  write_file(path, content)                     │    │  │
+│  │  │  edit_file(path, old_text, new_text)           │    │  │
+│  │  │  ├── Paths resolved via _resolve_path()        │    │  │
+│  │  │  └── chown to linux_user in auth mode          │    │  │
 │  │  └────────────────────────────────────────────────┘    │  │
 │  └────────────────────────────────────────────────────────┘  │
 │                                                              │
@@ -110,6 +116,13 @@ The server is built on FastMCP in stateless mode — each HTTP request is handle
 - On first request per user: creates OS account and workspace directory (lazy provisioning)
 - On timeout, the process is killed via `proc.kill()`
 - Returns `{stdout, stderr, exit_code}`
+
+**File tools (`read_file`, `write_file`, `edit_file`):**
+- All paths are resolved via `_resolve_path()` — relative paths are resolved against the user's workspace (`/workspace/<user>` in auth mode, `/workspace` in no-auth mode)
+- `read_file(path, limit)` — reads file as UTF-8 with optional line limit. Returns `{content, size, lines}`
+- `write_file(path, content)` — writes file, creating parent directories as needed. Returns `{status, size, path}`
+- `edit_file(path, old_text, new_text)` — exact string replacement; `old_text` must appear exactly once. Returns `{status, replacements}`
+- In auth mode, written/edited files are `chown`ed to the authenticated user so they remain accessible via `bash_exec`
 
 ### Token Generation (`server/generate_token.py`)
 
