@@ -12,6 +12,7 @@ BASH_TIMEOUT_MAX = int(os.environ.get("BASH_TIMEOUT_MAX", "300"))
 PORT = int(os.environ.get("MCP_PORT", "8080"))
 JWT_SECRET = os.environ.get("JWT_SECRET", "")
 ALLOW_NO_AUTH = os.environ.get("ALLOW_NO_AUTH", "").lower() in ("1", "true", "yes")
+ENABLE_FILE_TOOLS = os.environ.get("ENABLE_FILE_TOOLS", "").lower() not in ("0", "false", "no")
 
 current_user: ContextVar[str] = ContextVar("current_user")
 
@@ -239,7 +240,6 @@ async def bash_exec(command: str, timeout: int = 30) -> dict:
         }
 
 
-@mcp.tool()
 async def read_file(path: str, limit: int = 0) -> dict:
     """Read the contents of a file. Paths are resolved relative to the
     user's workspace directory. Use ``limit`` to return only the first N lines."""
@@ -270,7 +270,6 @@ async def read_file(path: str, limit: int = 0) -> dict:
     }
 
 
-@mcp.tool()
 async def write_file(path: str, content: str) -> dict:
     """Write content to a file, creating parent directories as needed.
     Paths are resolved relative to the user's workspace directory."""
@@ -296,7 +295,6 @@ async def write_file(path: str, content: str) -> dict:
     }
 
 
-@mcp.tool()
 async def edit_file(path: str, old_text: str, new_text: str) -> dict:
     """Replace an exact occurrence of ``old_text`` with ``new_text`` in a file.
     ``old_text`` must appear exactly once; otherwise an error is returned.
@@ -334,6 +332,12 @@ async def edit_file(path: str, old_text: str, new_text: str) -> dict:
         return {"error": f"Permission denied: {resolved}"}
 
     return {"status": "ok", "replacements": 1}
+
+
+if ENABLE_FILE_TOOLS:
+    mcp.tool()(read_file)
+    mcp.tool()(write_file)
+    mcp.tool()(edit_file)
 
 
 # ---------------------------------------------------------------------------

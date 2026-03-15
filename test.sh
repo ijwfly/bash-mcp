@@ -213,6 +213,30 @@ result=$(extract_stdout "$resp")
 docker compose down --volumes
 [ "$result" = "ok" ] && pass "ALLOW_NO_AUTH allows open access" || fail "Expected 'ok', got '$result'"
 
+# ─── Test 14: ENABLE_FILE_TOOLS=false → only bash_exec ────────────────────
+echo ""
+echo "--- Test 14: ENABLE_FILE_TOOLS=false → no file tools ---"
+ALLOW_NO_AUTH=true ENABLE_FILE_TOOLS=false docker compose up -d
+sleep 3
+# List tools via tools/list
+tools_resp=$(curl -sf -X POST "$MCP_URL" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","method":"tools/list","id":1}')
+docker compose down --volumes
+tool_names=$(echo "$tools_resp" | grep '^data:' | tail -1 | sed 's/^data://' | python3 -c "
+import sys, json
+resp = json.load(sys.stdin)
+tools = resp.get('result', {}).get('tools', [])
+for t in tools:
+    print(t['name'])
+")
+if echo "$tool_names" | grep -q "bash_exec" && ! echo "$tool_names" | grep -q "read_file"; then
+  pass "Only bash_exec registered (file tools disabled)"
+else
+  fail "Expected only bash_exec, got: $tool_names"
+fi
+
 # ─── Done ─────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}All tests passed!${NC}"
