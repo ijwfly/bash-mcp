@@ -56,6 +56,69 @@ with `&&` or write a script if you need stateful execution.
 }
 ```
 
+### Tool: `read_file`
+
+**Description:**
+Reads the contents of a file. Paths are resolved relative to the user's workspace directory.
+
+**Parameters:**
+
+| Parameter | Type   | Required | Default | Description                          |
+|-----------|--------|----------|---------|--------------------------------------|
+| `path`    | string | yes      | —       | File path (relative to workspace or absolute) |
+| `limit`   | int    | no       | 0       | Return only first N lines (0 = all)  |
+
+**Returns:**
+```json
+{
+  "content": "string",
+  "size": 1234,
+  "lines": 42
+}
+```
+
+### Tool: `write_file`
+
+**Description:**
+Writes content to a file, creating parent directories as needed. In auth mode, file ownership is set to the authenticated user.
+
+**Parameters:**
+
+| Parameter | Type   | Required | Default | Description                          |
+|-----------|--------|----------|---------|--------------------------------------|
+| `path`    | string | yes      | —       | File path (relative to workspace or absolute) |
+| `content` | string | yes      | —       | Content to write                     |
+
+**Returns:**
+```json
+{
+  "status": "ok",
+  "size": 1234,
+  "path": "/workspace/user_alice/foo.txt"
+}
+```
+
+### Tool: `edit_file`
+
+**Description:**
+Replaces an exact occurrence of `old_text` with `new_text` in a file. `old_text` must appear exactly once.
+
+**Parameters:**
+
+| Parameter  | Type   | Required | Default | Description                          |
+|------------|--------|----------|---------|--------------------------------------|
+| `path`     | string | yes      | —       | File path (relative to workspace or absolute) |
+| `old_text` | string | yes      | —       | Text to find (must be unique)        |
+| `new_text` | string | yes      | —       | Replacement text                     |
+
+**Returns:**
+```json
+{
+  "status": "ok",
+  "replacements": 1
+}
+```
+
 ---
 
 ## Authentication
