@@ -9,8 +9,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates sudo \
     && rm -rf /var/lib/apt/lists/*
 
-# Layer 2: allow passwordless sudo for root (needed for lazy user creation)
-RUN echo "root ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/bash-mcp
+# Layer 2: sudo + user isolation setup
+# - passwordless sudo for root (needed for lazy user creation via sudo -u)
+# - mcpusers group: every provisioned user joins it; per-group resource
+#   limits are rendered into /etc/security/limits.d by entrypoint.sh
+# - pam_limits on sudo sessions so those limits apply to sudo -u commands
+RUN echo "root ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/bash-mcp \
+    && groupadd mcpusers \
+    && sh -c 'grep -q pam_limits.so /etc/pam.d/sudo || echo "session    required   pam_limits.so" >> /etc/pam.d/sudo'
 
 # Layer 3: Python deps (cached separately from app code)
 COPY server/requirements.txt /opt/server/requirements.txt

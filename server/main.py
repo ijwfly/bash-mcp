@@ -1,20 +1,30 @@
 import asyncio
 import json
 import os
-import signal
-import subprocess
-from contextvars import ContextVar
+import time
 
 import jwt
 from mcp.server.fastmcp import FastMCP
 
-BASH_TIMEOUT_MAX = int(os.environ.get("BASH_TIMEOUT_MAX", "300"))
-PORT = int(os.environ.get("MCP_PORT", "8080"))
-JWT_SECRET = os.environ.get("JWT_SECRET", "")
-ALLOW_NO_AUTH = os.environ.get("ALLOW_NO_AUTH", "").lower() in ("1", "true", "yes")
-ENABLE_FILE_TOOLS = os.environ.get("ENABLE_FILE_TOOLS", "").lower() not in ("0", "false", "no")
-
-current_user: ContextVar[str] = ContextVar("current_user")
+import registry
+from common import (
+    ALLOW_NO_AUTH,
+    BASH_TIMEOUT_MAX,
+    ENABLE_FILE_TOOLS,
+    JWT_SECRET,
+    PORT,
+    WORKSPACE_ROOT,
+    PathOutsideWorkspace,
+    current_user,
+    ensure_user,
+    get_current_user,
+    kill_process_group,
+    logger,
+    resolve_path,
+    run_file_op,
+    workspace_for,
+)
+from http_api import build_routes
 
 mcp = FastMCP(
     "bash-mcp",
@@ -24,31 +34,21 @@ mcp = FastMCP(
 )
 
 
-def ensure_user(linux_user: str) -> None:
-    """Create OS user and workspace directory if they don't exist yet."""
-    # Check for the OS user, not the directory — the workspace dir may
-    # persist across container restarts via a bind mount.
-    r = subprocess.run(["id", linux_user], capture_output=True)
-    if r.returncode != 0:
-        subprocess.run(
-            ["useradd", "-m", "-s", "/bin/bash", linux_user],
-            check=False,
-            capture_output=True,
-        )
-    workspace = f"/workspace/{linux_user}"
-    os.makedirs(workspace, exist_ok=True)
-    subprocess.run(["chown", "-R", f"{linux_user}:{linux_user}", workspace], check=False)
-
-
 # ---------------------------------------------------------------------------
 # ASGI auth middleware
 # ---------------------------------------------------------------------------
+
+# Paths that bypass JWT auth: /health is public, /admin/* is guarded by
+# ADMIN_TOKEN inside its handlers (http_api.py).
+AUTH_EXEMPT_PREFIXES = ("/health", "/admin")
+
 
 class JWTAuthMiddleware:
     """Pure ASGI middleware that verifies JWT Bearer tokens.
 
     Behaviour:
-    - ``JWT_SECRET`` is set → tokens are verified (normal mode).
+    - ``JWT_SECRET`` is set → tokens are verified (normal mode); the ``sub``
+      claim must be a valid linux username AND an active user in the registry.
     - ``JWT_SECRET`` is empty and ``ALLOW_NO_AUTH=true`` → open access, no auth.
     - ``JWT_SECRET`` is empty and ``ALLOW_NO_AUTH`` is not set → all requests
       are rejected with 403 (safe default).
@@ -60,6 +60,13 @@ class JWTAuthMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             # lifespan or websocket — pass through
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path == "/health" or any(
+            path == p or path.startswith(p + "/") for p in AUTH_EXEMPT_PREFIXES
+        ):
             await self.app(scope, receive, send)
             return
 
@@ -84,9 +91,11 @@ class JWTAuthMiddleware:
         try:
             payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         except jwt.ExpiredSignatureError:
+            logger.warning("auth failed reason=expired path=%s", path)
             await self._send_401(send, "Token expired")
             return
         except jwt.InvalidTokenError:
+            logger.warning("auth failed reason=invalid path=%s", path)
             await self._send_401(send, "Invalid token")
             return
 
@@ -94,6 +103,21 @@ class JWTAuthMiddleware:
         if not linux_user:
             await self._send_401(send, "Token missing sub claim")
             return
+        if not registry.LINUX_USER_RE.match(linux_user):
+            logger.warning("auth failed reason=bad_sub sub=%r path=%s", linux_user, path)
+            await self._send_401(send, "Invalid sub claim")
+            return
+        try:
+            if not registry.is_active(linux_user):
+                logger.warning("auth failed reason=unknown_or_revoked user=%s path=%s",
+                               linux_user, path)
+                await self._send_401(send, "Unknown or revoked user")
+                return
+        except registry.RegistryError as e:
+            logger.error("registry unavailable: %s", e)
+            await self._send_error(send, 503, "User registry unavailable")
+            return
+
         ctx_token = current_user.set(linux_user)
         try:
             await self.app(scope, receive, send)
@@ -102,9 +126,7 @@ class JWTAuthMiddleware:
 
     @staticmethod
     async def _send_error(send, status: int, detail: str):
-        import json as _json
-
-        body = _json.dumps({"error": detail}).encode()
+        body = json.dumps({"error": detail}).encode()
         await send({
             "type": "http.response.start",
             "status": status,
@@ -128,60 +150,6 @@ class JWTAuthMiddleware:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _resolve_path(path: str) -> tuple[str, str | None]:
-    """Return (absolute_path, linux_user | None)."""
-    try:
-        linux_user = current_user.get()
-    except LookupError:
-        linux_user = None
-
-    if linux_user:
-        ensure_user(linux_user)
-        cwd = f"/workspace/{linux_user}"
-    else:
-        cwd = "/workspace"
-
-    if not os.path.isabs(path):
-        path = os.path.join(cwd, path)
-    path = os.path.realpath(path)
-
-    return path, linux_user
-
-
-async def _run_file_op(linux_user: str, payload: dict) -> dict:
-    """Run a file operation as linux_user via the file_helper.py subprocess."""
-    cmd = ["sudo", "-u", linux_user, "python3", "/opt/server/file_helper.py"]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        preexec_fn=os.setsid,
-    )
-    stdin_data = json.dumps(payload).encode()
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=stdin_data), timeout=30
-        )
-    except asyncio.TimeoutError:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            proc.kill()
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            pass
-        return {"error": "File operation timed out"}
-    if proc.returncode != 0:
-        return {"error": stderr.decode(errors="replace").strip() or "Helper failed"}
-    return json.loads(stdout.decode())
-
-
-# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
@@ -190,24 +158,25 @@ async def bash_exec(command: str, timeout: int = 30) -> dict:
     """Executes a bash command in a subprocess. Each call is stateless —
     a new subshell is spawned every time, so state does not persist
     between calls (no shared environment variables, working directory
-    resets to /workspace on each invocation). Chain dependent commands
-    with && or write a script if you need stateful execution."""
+    resets on each invocation). Chain dependent commands with && or
+    write a script if you need stateful execution.
+
+    Work only inside your workspace directory — the ``cwd`` returned in the
+    result. Files outside it are not writable, are not covered by the file
+    tools or the artifacts API, and may disappear at any time."""
     timeout = max(1, min(timeout, BASH_TIMEOUT_MAX))
 
-    # Determine user context
-    try:
-        linux_user = current_user.get()
-    except LookupError:
-        linux_user = None
+    linux_user = get_current_user()
 
     if linux_user:
         ensure_user(linux_user)
-        cwd = f"/workspace/{linux_user}"
+        cwd = workspace_for(linux_user)
         cmd = ["sudo", "-u", linux_user, "bash", "-c", command]
     else:
-        cwd = "/workspace"
+        cwd = WORKSPACE_ROOT
         cmd = ["bash", "-c", command]
 
+    started = time.monotonic()
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -218,120 +187,66 @@ async def bash_exec(command: str, timeout: int = 30) -> dict:
 
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        logger.info(
+            "bash_exec user=%s exit=%s duration=%.2fs command=%r",
+            linux_user, proc.returncode, time.monotonic() - started, command[:200],
+        )
         return {
             "stdout": stdout.decode(errors="replace"),
             "stderr": stderr.decode(errors="replace"),
             "exit_code": proc.returncode,
+            "cwd": cwd,
         }
     except asyncio.TimeoutError:
         # Kill entire process group (sudo + bash + all children)
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            proc.kill()
+        kill_process_group(proc)
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
         except asyncio.TimeoutError:
             pass
+        logger.info(
+            "bash_exec user=%s exit=timeout duration=%.2fs command=%r",
+            linux_user, time.monotonic() - started, command[:200],
+        )
         return {
             "stdout": "",
             "stderr": f"Command timed out after {timeout} seconds",
             "exit_code": -1,
+            "cwd": cwd,
         }
 
 
-async def read_file(path: str, limit: int = 0) -> dict:
-    """Read the contents of a file. Paths are resolved relative to the
-    user's workspace directory. Use ``limit`` to return only the first N lines."""
-    resolved, linux_user = _resolve_path(path)
-
-    if linux_user:
-        return await _run_file_op(linux_user, {"op": "read", "path": resolved, "limit": limit})
-
+async def _file_tool(op_name: str, path: str, payload: dict) -> dict:
     try:
-        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-    except FileNotFoundError:
-        return {"error": f"File not found: {resolved}"}
-    except IsADirectoryError:
-        return {"error": f"Is a directory: {resolved}"}
-    except PermissionError:
-        return {"error": f"Permission denied: {resolved}"}
+        resolved, linux_user = resolve_path(path)
+    except PathOutsideWorkspace as e:
+        return {"error": str(e)}
+    result = await run_file_op(linux_user, {**payload, "op": op_name, "path": resolved})
+    logger.info("%s user=%s path=%s ok=%s", op_name, linux_user, resolved,
+                "error" not in result)
+    return result
 
-    lines = content.splitlines(keepends=True)
-    if limit > 0:
-        lines = lines[:limit]
-        content = "".join(lines)
 
-    return {
-        "content": content,
-        "size": os.path.getsize(resolved),
-        "lines": len(lines),
-    }
+async def read_file(path: str, limit: int = 0) -> dict:
+    """Read the contents of a file. Paths are resolved relative to your
+    workspace directory; paths outside the workspace are rejected.
+    Use ``limit`` to return only the first N lines."""
+    return await _file_tool("read", path, {"limit": limit})
 
 
 async def write_file(path: str, content: str) -> dict:
     """Write content to a file, creating parent directories as needed.
-    Paths are resolved relative to the user's workspace directory."""
-    resolved, linux_user = _resolve_path(path)
-
-    if linux_user:
-        return await _run_file_op(linux_user, {"op": "write", "path": resolved, "content": content})
-
-    try:
-        parent = os.path.dirname(resolved)
-        os.makedirs(parent, exist_ok=True)
-        with open(resolved, "w", encoding="utf-8") as f:
-            f.write(content)
-    except PermissionError:
-        return {"error": f"Permission denied: {resolved}"}
-    except IsADirectoryError:
-        return {"error": f"Is a directory: {resolved}"}
-
-    return {
-        "status": "ok",
-        "size": os.path.getsize(resolved),
-        "path": resolved,
-    }
+    Paths are resolved relative to your workspace directory; paths outside
+    the workspace are rejected."""
+    return await _file_tool("write", path, {"content": content})
 
 
 async def edit_file(path: str, old_text: str, new_text: str) -> dict:
     """Replace an exact occurrence of ``old_text`` with ``new_text`` in a file.
     ``old_text`` must appear exactly once; otherwise an error is returned.
-    Paths are resolved relative to the user's workspace directory."""
-    resolved, linux_user = _resolve_path(path)
-
-    if linux_user:
-        return await _run_file_op(linux_user, {
-            "op": "edit", "path": resolved,
-            "old_text": old_text, "new_text": new_text,
-        })
-
-    try:
-        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-    except FileNotFoundError:
-        return {"error": f"File not found: {resolved}"}
-    except IsADirectoryError:
-        return {"error": f"Is a directory: {resolved}"}
-    except PermissionError:
-        return {"error": f"Permission denied: {resolved}"}
-
-    count = content.count(old_text)
-    if count == 0:
-        return {"error": "old_text not found"}
-    if count > 1:
-        return {"error": f"old_text found {count} times, must be unique"}
-
-    new_content = content.replace(old_text, new_text, 1)
-
-    try:
-        with open(resolved, "w", encoding="utf-8") as f:
-            f.write(new_content)
-    except PermissionError:
-        return {"error": f"Permission denied: {resolved}"}
-
-    return {"status": "ok", "replacements": 1}
+    Paths are resolved relative to your workspace directory; paths outside
+    the workspace are rejected."""
+    return await _file_tool("edit", path, {"old_text": old_text, "new_text": new_text})
 
 
 if ENABLE_FILE_TOOLS:
@@ -341,13 +256,46 @@ if ENABLE_FILE_TOOLS:
 
 
 # ---------------------------------------------------------------------------
+# Startup reconciliation
+# ---------------------------------------------------------------------------
+
+def startup_reconcile() -> None:
+    """Re-provision OS users for everyone in the registry.
+
+    The workspace is a bind mount, so user dirs persist across container
+    restarts while OS users do not — recreate them up front so `sudo -u`
+    works immediately. On the very first start with a pre-existing workspace
+    (upgrade path), import existing user_* dirs into the registry.
+    """
+    if not JWT_SECRET:
+        return
+    try:
+        users = registry.list_users()
+        if not users and os.path.isdir(WORKSPACE_ROOT):
+            for name in sorted(os.listdir(WORKSPACE_ROOT)):
+                if (registry.LINUX_USER_RE.match(name)
+                        and os.path.isdir(os.path.join(WORKSPACE_ROOT, name))):
+                    registry.add_user(name[len("user_"):])
+                    logger.info("migrated existing workspace dir=%s into registry", name)
+            users = registry.list_users()
+        for user in users:
+            if not user.get("revoked"):
+                ensure_user(user["linux_user"])
+    except registry.RegistryError as e:
+        logger.error("startup reconcile failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
 
+    startup_reconcile()
+
     app = mcp.streamable_http_app()
+    app.router.routes.extend(build_routes())
     app = JWTAuthMiddleware(app)
 
     uvicorn.run(app, host="0.0.0.0", port=PORT)
