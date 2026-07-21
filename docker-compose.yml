@@ -1,13 +1,29 @@
 services:
   bash-mcp:
     build: .
+    restart: unless-stopped
     ports:
+      # For non-public deployments bind to loopback instead:
+      #   - "127.0.0.1:8080:8080"
       - "8080:8080"
     volumes:
       - ./workspace:/workspace
     environment:
       - MCP_PORT=8080
-      - BASH_TIMEOUT_MAX=300
+      - BASH_TIMEOUT_MAX=${BASH_TIMEOUT_MAX:-300}
       - JWT_SECRET=${JWT_SECRET:-}
       - ALLOW_NO_AUTH=${ALLOW_NO_AUTH:-}
       - ENABLE_FILE_TOOLS=${ENABLE_FILE_TOOLS:-true}
+      - ENABLE_ADMIN_API=${ENABLE_ADMIN_API:-}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      - USER_MAX_PROCS=${USER_MAX_PROCS:-256}
+      - USER_MAX_MEM_MB=${USER_MAX_MEM_MB:-4096}
+    mem_limit: ${CONTAINER_MEM_LIMIT:-2g}
+    cpus: ${CONTAINER_CPUS:-2}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 3s

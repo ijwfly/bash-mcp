@@ -28,3 +28,4 @@ workspace/
 # Environment
 .env
 .env.*
+!.env.example
